@@ -38,6 +38,8 @@
 #   · SNVN (Retro Studios, Donkey Kong Country: Tropical Freeze): zlib program records in the SNVN chunks of MaterialArchive.arc, of the MTRL resources in its .pak archives
 #       and of the startup material archive LZSS-compressed in main, see rfrm_shaders and retro_main_forms
 #   · BERG (Snowdrop, Mario + Rabbids Sparks of Hope): shader objects in the individually zstd-compressed records of its SDF data slices, see snowdrop_shaders
+#   · Unreal Engine 3 shader caches (Batman: Arkham Asylum): GlobalShaderCache-Switch.bin and the cooked packages (.xxx, chunks of Oodle Leviathan blocks decoded by the game's own decoder in
+#       the Mac host, uepak.ue3_image), each shader a record of platform, frequency and code (code area + control section), see ue3_shaders
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -1467,9 +1469,9 @@ def smash_arc_shaders(path, rel, ents, out):
 
 _OODLE = None
 def oodle(comp, n):
-    """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, and Oodle is linked into main), or LZ5_decompress_safe (DRAGON QUEST XI S's legacy Unreal paks):
-    one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host, DM_OODLE_MODULES = the rewritten modules it loads
-    (the NSP script sets both for a game with Trinity packs or legacy Unreal paks, profile_guess.py shader_sources)"""
+    """The game's own decoder: OodleLZ_Decompress (Trinity's packs are Oodle Mermaid, Batman: Arkham Asylum's UE3 packages Oodle Leviathan, and Oodle is linked into main), or LZ5_decompress_safe
+    (DRAGON QUEST XI S's legacy Unreal paks): one Mac host per worker process in its tool mode (dm/host/hle_oodle.c, DM_OODLE_SERVE), fed over a pipe. DM_OODLE_HOST = the host,
+    DM_OODLE_MODULES = the rewritten modules it loads (the NSP script sets both for a game with Trinity packs, Oodle-compressed UE3 packages or legacy Unreal paks, profile_guess.py shader_sources)"""
     global _OODLE
     if _OODLE is None:
         import tempfile
@@ -1740,6 +1742,28 @@ def arh_shaders(path, rel, entries, out):
             monolith_shaders(data, f'/{rel}{name}', out)
 
 
+UE3_TAG, UE3_GSC = struct.pack('<I', uepak.PACKAGE_TAG), b'BMSG'   # an Unreal Engine 3 package (uepak.ue3_summary); the global shader cache (GlobalShaderCache-Switch.bin: 'BMSG', u32 file version, u32 licensee version)
+UE3_FREQ = {0: 'vs', 1: 'ps'}   # the frequency byte of a UE3 shader (EShaderFrequency before hull and domain shaders were added)
+def ue3_shaders(d, label):
+    """The shaders of Unreal Engine 3's shader caches (Batman: Arkham Asylum: the global one in GlobalShaderCache-Switch.bin, 179, and the material shader caches in the cooked packages,
+    read once their chunks are decoded, uepak.ue3_image: 516,000 records in 574 of 2,674 packages, 41,641 unique). Each shader, as the engine's Switch RHI serializes it: u8 platform (5),
+    u8 frequency (UE3_FREQ), then its code as a byte array (i32 length): {u32 code area length, u32 control length, u32 flags (0; 0x20000 in 29 pixel shaders)}, the code area, the control
+    section (0x880 bytes) and a tail (20 bytes after a vertex shader, 4 after a pixel shader). Found by the control magic, with the code area of the length control +0x704 gives right in
+    front of it, the three words that repeat both lengths in front of that, and an array length that covers them with a tail of at most 64 bytes; every control magic of the decoded packages
+    is in such a record. The engine combines vertex and pixel shaders per draw (separable_pairs)"""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start(); n = struct.unpack_from('<I', d, c + 0x704)[0] if c + 0x708 <= len(d) else 0; k = c - n
+        alen, ncode, nctl, _ = struct.unpack_from('<i3I', d, k - 16) if 18 <= k else (0, 0, 0, 0)
+        if not n or d[k:k + 4] not in (GFX_MAGIC, CS_MAGIC) or ncode != n or not 0 <= alen - 12 - n - nctl <= 64 or c + nctl > len(d):
+            print(f'[RED] {label} control section @{c:#x}: not in a shader record of the known form; left out', flush=True); continue
+        ctl, code = d[c:c + nctl], d[k:c]; st = UE3_FREQ.get(d[k - 17])
+        if not st or st != ('cs' if code[:4] == CS_MAGIC else sph_stage(code)): red(f'{label}: the shader at {k:#x} has frequency {d[k - 17]}, its code area says {"compute" if code[:4] == CS_MAGIC else sph_stage(code)}')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label}: shader at {k:#x} ({st}): {why}')
+        out.append((f'{label}#UE3@{k:#x}', st, ctl, code))
+    return out
+
 def yaz0(s):
     """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
     Group header bits: 1 = one literal byte; 0 = back-reference, 2 bytes {length high nibble, 12-bit distance} (distance + 1); length 0 reads one more byte + 0x12, else + 2. Overlapping copies are expanded by their period"""
@@ -1959,7 +1983,7 @@ def ps_inputs(code):
     """Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
     return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
 
-SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records (UE3's shader caches, '#UE3@', among them), MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; and YEBIS's effect file (tfxo_shaders)
@@ -2066,6 +2090,12 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == UE3_GSC or head[:4] == UE3_TAG and 100 <= struct.unpack_from('<H', head, 4)[0] < 1000:   # the global shader cache, or an Unreal Engine 3 package (not a texture file cache, not UE4: uepak.ue3_summary)
+        d = open(path, 'rb').read()
+        if head[:4] == UE3_TAG and not uepak.ue3_summary(d): red(f'/{rel}: an Unreal Engine 3 package whose summary does not read (uepak.ue3_summary)')
+        try: found += ue3_shaders(d if head[:4] == UE3_GSC else uepak.ue3_image(d, oodle), '/' + rel)   # its chunks decoded, Oodle through the game's own decoder
+        except ValueError as e: red(f'/{rel}: {e}')
         return rel, uniq_keys(found), var_pairs(found), trees
     if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
         kt_shaders(open(path, 'rb').read(), '/' + rel, found)
@@ -2233,7 +2263,8 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
-                                            ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
+                                            ('Unreal Engine shader code archives', any('#UE' in r[4] and '#UE3@' not in r[4] for r in rows)),
+                                            ('Unreal Engine 3 shader caches', any('#UE3@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

@@ -31,6 +31,8 @@
 # Shader code archive (version 2): shader map hashes (20 bytes each), shader hashes (20 each), shader map entries {u32 first index, u32 shader count, u32 first preload, u32 preload count}, shader
 #   entries {u64 offset, u32 size, u32 raw size, u8 frequency} (17 bytes, packed), preload entries (16 each), shader indices (u32): each array is a u32 count and its elements; the code follows,
 #   offsets relative to its start. A shader whose size differs from its raw size is compressed.
+# Unreal Engine 3 (Batman: Arkham Asylum) has no pak: its cooked packages are RomFS files of their own (BmGame/CookedSwitch/*.xxx), each compressed in chunks of Oodle blocks
+#   (ue3_summary, ue3_image); the shaders are in the shader caches inside them, which shader_split.py reads (ue3_shaders).
 # Usage: uepak.py list <pak> <main NSO> <out tsv>                       every file in the pak: path, raw size, stored size, compression, encrypted, blocks
 #        uepak.py job <RomFS> <main NSO> <work dir> [<Mac host> <rewritten modules>]   the shader code archives of every pak, and an Oodle job of their Oodle-compressed shaders (LZ4 ones
 #                                                                       decoded at once); IoStore shader libraries (UE 5.6) decoded at once through the game's Oodle in the host (OodleHost)
@@ -488,6 +490,66 @@ def lslg(s):
     c = k - 4 - ncode
     if c < 4 or struct.unpack_from('<I', s, c - 4)[0] != ncode or k + nctl > len(s): return None
     return s[4:6].decode('latin1'), s[k:k + nctl], s[c:c + ncode]
+
+PACKAGE_TAG = 0x9E2A83C1   # an Unreal package's first word (PACKAGE_FILE_TAG), and the first word of each of a UE3 package's compressed chunks
+def ue3_summary(b):
+    """The summary of an Unreal Engine 3 package, read as far as its compressed chunk table, or None for a file that is not one (Unreal Engine 4 writes a negative legacy version after the
+    tag; Batman: Arkham Asylum's texture file cache Textures.tfc starts with a compressed chunk, block size 0x20000 where the version would be). Layout (Batman: Arkham Asylum, file version 579,
+    licensee 21): tag, u16 file version, u16 licensee version, i32 header size, folder name (FString), u32 package flags, name, export and import counts and offsets (i32 each), the depends offset,
+    a GUID, the generations (i32 count, then export count, name count and, from version 322, net object count each), engine version, cooker version, u32 compression flags (Batman: 8, Oodle),
+    then the compressed chunks {raw offset, raw size, stored offset, stored size}. b: at least the summary's bytes. → {'version', 'licensee', 'flags', 'compression', 'chunks'}"""
+    if len(b) < 0x40 or struct.unpack_from('<I', b)[0] != PACKAGE_TAG: return None
+    ver, lic = struct.unpack_from('<HH', b, 4)
+    if not 100 <= ver < 1000: return None
+    try:
+        r = R(b, 12); r.fstr(); flags = r.take('<I'); r.raw(4 * 7 + 16)
+        gens = r.take('<i'); r.raw(gens * (12 if ver >= 322 else 8)); r.raw(8 if ver >= 277 else 4)   # engine and (from version 277) cooker versions
+        comp, n = r.take('<Ii') if ver >= 334 else (0, 0)   # packages are compressed from version 334
+        chunks = [r.take('<4I') for _ in range(n)]
+    except (struct.error, UnicodeDecodeError): return None
+    return {'version': ver, 'licensee': lic, 'flags': flags, 'compression': comp, 'chunks': chunks}
+
+def ue3_chunk_blocks(b, chunk):
+    """The blocks of one compressed chunk of a UE3 package (ue3_summary): at its stored offset the tag, the block size, the stored and raw sizes, then {stored size, raw size} for each block
+    of up to block size raw bytes, then the blocks. → [(stored offset, stored size, raw size), …]; ValueError when the chunk is not of that form"""
+    u, n, c, cn = chunk
+    if c + 16 > len(b): raise ValueError(f'chunk at {c:#x} lies past the end of the file')
+    tag, bs, stored, raw = struct.unpack_from('<4I', b, c)
+    if tag != PACKAGE_TAG or raw != n or not bs: raise ValueError(f'chunk at {c:#x} has no chunk header of the known form (tag {tag:#x}, block size {bs:#x}, raw size {raw:#x} for {n:#x})')
+    nb = -(-raw // bs); q, out = c + 16 + 8 * nb, []
+    for i in range(nb):
+        bc, bu = struct.unpack_from('<2I', b, c + 16 + 8 * i); out.append((q, bc, bu)); q += bc
+    if sum(bu for _, _, bu in out) != raw or q > len(b): raise ValueError(f'chunk at {c:#x}: its blocks do not add up to its raw size')
+    return out
+
+def ue3_oodle(b):
+    """Whether a UE3 package's chunks are Oodle-compressed (Batman: Arkham Asylum: compression flags 8, every block Oodle Leviathan, header 8C 0C): the first compressed block starts with an
+    Oodle block header (0x8C or 0xCC). b: the package, or at least up to the first byte of its first block"""
+    s = ue3_summary(b)
+    if not s or not s['chunks'] or s['chunks'][0][2] + 16 > len(b): return False
+    c = s['chunks'][0][2]; tag, bs, _, raw = struct.unpack_from('<4I', b, c); nb = -(-raw // bs) if bs else 0
+    if tag != PACKAGE_TAG or not nb or c + 16 + 8 * nb >= len(b): return False
+    bc, bu = struct.unpack_from('<2I', b, c + 16)
+    return bc != bu and b[c + 16 + 8 * nb] in (0x8C, 0xCC)
+
+def ue3_image(b, decode):
+    """A UE3 package with its compressed chunks decoded at their raw offsets (the bytes before the first chunk are the stored summary). A block whose stored size is its raw size is stored;
+    zlib blocks (compression flag 1) are inflated here, Oodle blocks go to decode(compressed, raw length), the game's own decoder in the Mac host (OodleHost, shader_split.py oodle).
+    A package without chunks is returned as it is. ValueError for anything else (LZO, LZX)"""
+    import zlib
+    s = ue3_summary(b)
+    if not s['chunks']: return b
+    out = bytearray(max(u + n for u, n, _, _ in s['chunks'])); out[:s['chunks'][0][0]] = b[:s['chunks'][0][0]]
+    for ch in s['chunks']:
+        o = ch[0]
+        for q, bc, bu in ue3_chunk_blocks(b, ch):
+            blk = b[q:q + bc]
+            if bc == bu: out[o:o + bu] = blk
+            elif s['compression'] & 1: out[o:o + bu] = zlib.decompress(blk)
+            elif blk[0] in (0x8C, 0xCC): out[o:o + bu] = decode(blk, bu)
+            else: raise ValueError(f'block at {q:#x}: compression flags {s["compression"]:#x} and block header {blk[:2].hex()}, neither zlib nor Oodle')
+            o += bu
+    return bytes(out)
 
 if __name__ == '__main__':
     cmd = sys.argv[1] if len(sys.argv) > 1 else ''

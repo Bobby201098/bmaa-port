@@ -11,10 +11,12 @@
 // period, so frames at exactly 16.667 ms came 0.11 ms late each on the Mac (59.6 fps, every 150th frame shown two vsyncs). Slightly shorter, the host's present pacing sets the pace
 // (the acquire waits): Luigi's Mansion 3's display interval p99 18.69 → 16.67 ms, 60.0 fps. Not at 30: with present_interval display the presents follow every vsync and hold no
 // frame for two, so a shorter time showed some frames for one (30.4 fps); 30 writes the game's own 33.333 ms
-enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32 };
+// A screen percentage (PCT_F32) is no frame limit: it holds DM_RENDER_SCALE x 100 (the launcher's render scale, 0.5 to 1.0) and is written only when that is set, at any frame rate target.
+// A row with ptr2 follows one pointer more: the object's +ptr2 holds the pointer to the object the field is in
+enum { FPS_F32, VSYNCS_I32, MS_F32, FPS_I32, PCT_F32 };
 #define MS_MARGIN 0.5f
 static float ms_want(int fps) { return 1000.0f / (float)fps - (fps == 60 ? MS_MARGIN : 0); }
-static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; } k_locks[] = {
+static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field; uint8_t kind, copies; uint32_t ptr2; } k_locks[] = {
     // Pokemon Brilliant Diamond 1.3.0: Unity's Application.targetFrameRate. Its icall registration (main+0xe34e60) resolves to main+0xdc8e70 -> +0x5fa640,
     // which stores w0 at main+0x4afc868; the getter at +0x5fa630 reads the same int32. The game sets 30 when entering the field; display pacing alone does not remove that cap.
     { "94ceae325c205c4b9d6f7235552f28fd", "Unity targetFrameRate", 0, 0x4afc868, FPS_I32, 1 },
@@ -58,13 +60,25 @@ static const struct { const char *build, *what; uint64_t ptr_off; uint32_t field
     // started; the limiter (main+0x7a3e70) runs jobs or sleeps until 33.333 ms have passed, the float at main+0x13c94dc (read only there, at main+0x7a3ea8 and main+0x7a3f18), and the game
     // steps by the time that really passed. The game asks for present interval 2 too, which the profile's present_interval display ignores; both are needed
     { "79e5950ffa85acf63e28c9aec051eac2", "NLG frame limiter target", 0, 0x13c94dc, MS_F32, 1 },
+    // Batman: Arkham Asylum 1.0.0: Unreal Engine 3's tick limit. appUpdateTimeAndHandleMaxTickRate (main+0xe9fd40) sleeps until 1 / GEngine->GetMaxTickRate() has passed and steps the
+    // game by the time that really passed (GUseFixedTimeStep, main+0x2438394, is 0); UGameEngine::GetMaxTickRate (main+0x71f104) returns the float at +0x758 of the engine object
+    // (MaxSmoothedFrameRate, 30 from the game's config; +0x75c holds the minimum, 24) while the smoothing flag at main+0x249ba4c is set. GEngine is the pointer at main+0x249f530.
+    // The RHI builds its window with present interval 2 (FNVN11Viewport's constructor, main+0xe7901c) and never changes it (RHISetPresentInterval is an empty stub), which the
+    // profile's present_interval display ignores; both are needed
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 GEngine MaxSmoothedFrameRate", 0x249f530, 0x758, FPS_F32, 1 },
+    // Its dynamic resolution (FDynamicResolution at [GEngine]+0x4e8, made in FEngineLoop::Init, main+0xea1a64; its config read from [DynamicResolution] by FDynamicResolution::Init,
+    // main+0xe5b774): +0 bEnable (1), +4 MinScreenPercentage (85), +8 MaxScreenPercentage (100), +0xc FrameTimeBudget (33.3 ms), read again every frame by
+    // RefreshCurentFrameResolutionFraction (main+0xe5bd30). The render scale sets min and max alike, a fixed share of the 1920x1080 (docked) or 1280x720 (handheld) view; the budget
+    // follows the frame rate target, so the engine lowers the resolution where the GPU cannot hold it
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 dynamic resolution Min/MaxScreenPercentage", 0x249f530, 4, PCT_F32, 2, 0x4e8 },
+    { "adc8fed84d846ee84f174351c9584d52", "UE3 dynamic resolution FrameTimeBudget", 0x249f530, 0xc, MS_F32, 1, 0x4e8 },
 };
 #define NLOCKS ((int)(sizeof k_locks / sizeof k_locks[0]))
 
 static int rd(uint64_t a, void *out, size_t n) { vm_size_t got = 0; return a >= 0x1000 && vm_read_overwrite(mach_task_self(), (vm_address_t)a, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n; }
 
 void dm_fps_lock_tick(void) {
-    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target; static uint8_t *base; static const char *src;
+    static int state = -2, rows[NLOCKS], nrow, nlog[NLOCKS], target; static float pct; static uint8_t *base; static const char *src;
     if (state == -1) return;
     if (state == -2) {
         state = -1;
@@ -73,16 +87,29 @@ void dm_fps_lock_tick(void) {
         if (!nrow) return;
         const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET; src = e ? "DM_FPS_TARGET" : "game profile fps_target";
         if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; leaving the game's frame limit", e); t = 0; }
-        if (!t) { for (int r = 0; r < nrow; r++) LOG("main: %s left as the game sets it (%s)", k_locks[rows[r]].what, src); return; }
-        target = t; state = 0;
+        const char *rs = getenv("DM_RENDER_SCALE"); float sc = 0;   // the same range as the rewriter's render-scale stubs (loader.c)
+        if (rs) { char *end; sc = strtof(rs, &end); if (end == rs || *end || !(sc >= 0.5f && sc <= 1.0f)) { LOG("[RED] DM_RENDER_SCALE=%s: must be 0.5 to 1.0; keeping the game's size", rs); sc = 0; } }
+        int any = 0;
+        for (int r = 0; r < nrow; r++) {
+            int scale = k_locks[rows[r]].kind == PCT_F32;
+            if (scale ? !sc : !t) LOG("main: %s left as the game sets it (%s)", k_locks[rows[r]].what, scale ? "no DM_RENDER_SCALE" : src); else any = 1;
+        }
+        if (!any) return;
+        target = t; pct = sc * 100; state = 0;
     }
     for (int r = 0; r < nrow; r++) {
         int k = rows[r]; uint64_t obj = (uint64_t)(uintptr_t)base;
+        if (k_locks[k].kind == PCT_F32 ? !pct : !target) continue;
         if (k_locks[k].ptr_off && (!rd((uint64_t)(uintptr_t)(base + k_locks[k].ptr_off), &obj, sizeof obj) || !obj)) continue;   // not created yet
+        if (k_locks[k].ptr2 && (!rd(obj + k_locks[k].ptr2, &obj, sizeof obj) || !obj)) continue;
         for (int c = 0; c < k_locks[k].copies; c++) {
             uint64_t a = obj + k_locks[k].field + 4 * (uint64_t)c; uint32_t cur, want; char was[16];
             if (!rd(a, &cur, sizeof cur)) break;
-            if (k_locks[k].kind == FPS_F32 || k_locks[k].kind == MS_F32) {
+            if (k_locks[k].kind == PCT_F32) {
+                float f; memcpy(&f, &cur, sizeof f); memcpy(&want, &pct, sizeof want);
+                if (cur == want || !(f >= 10 && f <= 100)) continue;   // already set, or not a percentage yet
+                snprintf(was, sizeof was, "%g %%", f);
+            } else if (k_locks[k].kind == FPS_F32 || k_locks[k].kind == MS_F32) {
                 int ms = k_locks[k].kind == MS_F32; float f, w = ms ? ms_want(target) : (float)target; memcpy(&f, &cur, sizeof f); memcpy(&want, &w, sizeof want);
                 if (cur == want || !(ms ? f >= 8 && f <= 100 : f >= 10 && f <= 120)) continue;   // already set, or not set yet (RE Engine: 6000 at boot; Unreal: 0 = no limit until the config sets it)
                 snprintf(was, sizeof was, ms ? "%.3f ms" : "%g", f);
@@ -95,9 +122,11 @@ void dm_fps_lock_tick(void) {
             uint32_t *p = (uint32_t *)(uintptr_t)a;
             dm_guest_write_prepare(p, sizeof *p); __atomic_store_n(p, want, __ATOMIC_RELAXED);
             if (nlog[k] < 8) { nlog[k]++; char now[24];
-                if (k_locks[k].kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
+                if (k_locks[k].kind == PCT_F32) snprintf(now, sizeof now, "%g %%", pct);
+                else if (k_locks[k].kind == MS_F32) snprintf(now, sizeof now, "%.3f ms (%d fps)", ms_want(target), target);
                 else snprintf(now, sizeof now, "%u%s", k_locks[k].kind == FPS_F32 ? (unsigned)target : want, k_locks[k].kind == FPS_F32 || k_locks[k].kind == FPS_I32 ? " fps" : " vsyncs");
-                LOG("main: %s%s %s → %s (%s)", k_locks[k].what, k_locks[k].copies > 1 ? (c ? " (render thread)" : " (game thread)") : "", was, now, src); }
+                LOG("main: %s%s %s → %s (%s)", k_locks[k].what, k_locks[k].copies > 1 && k_locks[k].kind != PCT_F32 ? (c ? " (render thread)" : " (game thread)") : k_locks[k].copies > 1 ? (c ? " (max)" : " (min)") : "",
+                    was, now, k_locks[k].kind == PCT_F32 ? "DM_RENDER_SCALE" : src); }
         }
     }
 }
