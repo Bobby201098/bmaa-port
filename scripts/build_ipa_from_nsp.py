@@ -1878,6 +1878,8 @@ def report_profile_status(g, reg, pkg_ver, derived, provisional, artifact='IPA')
             say(f'this {artifact} uses the registered {pkg_ver} ({disp}) builds and every fix for them, with shader tables derived from the installed DLC')
         elif g.title_id != reg.title_id and not other and pkg_ver in reg.builds():   # a registered build under another title ID (same_build): every fix applies
             say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}) under title ID {g.title_id:016X}: its settings and every fix for its builds, with shaders split from this title\'s own files')
+        elif not reg.table('shader_map.tsv').exists() and not other and pkg_ver in reg.builds():   # a registered build of a profile that ships no shader tables (Batman: Arkham Asylum)
+            say(f'this {artifact} is game profile {reg.id}\'s {pkg_ver} ({disp}): its settings and every fix for its builds, with shaders split from the game\'s own files (the profile ships no shader tables)')
         else: say(f'[RED] this {artifact} uses {pkg_ver} ({disp}), which game profile {reg.id} was not brought up on ({registered_builds}): '
             'its settings, with this version\'s own shaders' + (f'; {", ".join(other)} {"is a build" if len(other) == 1 else "are builds"} the profile does not register, so the fixes made for '
             'the registered builds\' fixed addresses do not apply there; opt-in function patches apply only on a verified code match (see rewrite logs), and the game may not run as well' if other else '; every module is a registered build'))
