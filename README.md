@@ -21,7 +21,7 @@ An unofficial, fan-made port of **Batman: Arkham Asylum** that runs on iPhone, i
 
 1. Build the app from your copy of the game: [docs/nxnative.md](docs/nxnative.md) has the steps (*Pack an IPA*), and [docs/development.md](docs/development.md#a-mac-only-build-for-development) the Mac version, which comes with its own launcher app.
 2. **iPhone / iPad:** install the IPA with [AltServer](https://altstore.io)'s *Sideload .ipa* (hold ⌥ Option and click its menu-bar icon), over a cable. It takes about 15 minutes. Sideloadly could not install this app.
-3. **Mac:** open the launcher app that the build puts next to your game folder and press **Play**.
+3. **Mac:** open the launcher app that the build puts in your game folder and press **Play** (keep the folder: the game runs from it).
 
 ## Playing
 
