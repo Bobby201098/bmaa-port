@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-# The iOS launcher's settings for one game, from settings.tsv (its header describes the columns): the rows whose condition holds for the game, with the game's defaults, as JSON.
-# build_ipa.sh writes it into the app as dm/launcher.json; Launcher.swift draws the screen from it (an app without the file starts the game at once).
-# Usage: settings.py <game id> <rewritten modules dir> <control.nacp> <out.json>   (DM_GAMES_DIR finds provisional profiles, as in game.py; build:<VAR> defaults come from the environment)
+# A launcher's settings for one game, from settings.tsv (its header describes the columns): the rows whose condition holds for the game, with the game's defaults, as JSON.
+# build_ipa.sh writes the iOS list into the app as dm/launcher.json; Launcher.swift draws the screen from it (an app without the file starts the game at once). The Mac launcher
+# (dm/mac/make_launcher.py) takes the mac list.
+# Usage: settings.py <game id> <rewritten modules dir> <control.nacp> <out.json> [ios|mac]   (default ios; DM_GAMES_DIR finds provisional profiles, as in game.py; build:<VAR> defaults come
+#        from the environment)
 import json, os, re, sys
 from pathlib import Path
 
@@ -23,7 +25,7 @@ def fixups_keys(path):   # '# KEY<TAB>value' header rows of a rewriter table
     return {m[1] for m in re.finditer(r'^# (\w+)\t', path.read_text(encoding='utf-8'), re.M)}
 
 
-def build(gid, patched, control):
+def build(gid, patched, control, platform='ios'):
     g = game.load(gid)
     macros = dict(re.findall(r'^#define (DM_GAME_\w+) (.*)$', game.header(g), re.M))   # the host's own defaults, as it is compiled for this game
     keys = fixups_keys(Path(patched) / 'main.fixups.tsv')
@@ -34,6 +36,8 @@ def build(gid, patched, control):
         return macros[name].strip('"')
 
     def shown(cond, n):
+        if '|' in cond: return any(shown(c, n) for c in cond.split('|'))
+        if cond in ('ios', 'mac'): return cond == platform
         if cond == 'always': return True
         if cond == 'languages>1': return len(langs) > 1
         if cond.startswith('fixups:'): return cond[7:] in keys
@@ -68,7 +72,7 @@ def build(gid, patched, control):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 5: sys.exit('usage: settings.py <game id> <rewritten modules dir> <control.nacp> <out.json>')
-    d = build(*sys.argv[1:4])
+    if len(sys.argv) not in (5, 6) or sys.argv[5:] not in ([], ['ios'], ['mac']): sys.exit('usage: settings.py <game id> <rewritten modules dir> <control.nacp> <out.json> [ios|mac]')
+    d = build(*sys.argv[1:4], *sys.argv[5:])
     Path(sys.argv[4]).write_text(json.dumps(d, indent=1, ensure_ascii=False) + '\n', encoding='utf-8')
     print(' '.join(s['env'] for s in d['settings']))

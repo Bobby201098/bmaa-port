@@ -37,6 +37,15 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the game presents at interval 1, so a build cut makes the check jump to the end, and the host's present pacing (the acquire waits) holds 60 (its `patches.py`): frame time p50 16.66 / p95 16.85 ms, wakeups 2,050 → 320 a second.
 - **Found on:** [Taiko Risshiden V DX](../../dm/games/0100346017304000/README.md), in its menus and town; its movies, paced by their own player, ran at 60.
 
+### Unreal Engine 3's tick limit and a window built with interval 2
+
+- **Symptom:** 30 fps with the game's frame work at exactly 33.3 ms; with `present_interval display` the frames still came every 33.3 ms.
+- **Cause:** two caps. `appUpdateTimeAndHandleMaxTickRate` (`main+0xe9fd40`) sleeps until 1 / `GEngine->GetMaxTickRate()` has passed, and `UGameEngine::GetMaxTickRate` (`main+0x71f104`) returns the float at +0x758 of the engine object (`MaxSmoothedFrameRate`, 30 from the game's config; +0x75c holds the minimum, 24) while the smoothing flag at `main+0x249ba4c` is set; `GEngine` is the pointer at `main+0x249f530`. The game steps by the time that really passed (`GUseFixedTimeStep`, `main+0x2438394`, is 0). And the RHI builds its NVN window with present interval 2 (`FNVN11Viewport`'s constructor, `main+0xe7901c`) and never changes it: `RHISetPresentInterval` and `FNVN11Viewport::SetPresentInterval` are empty stubs. Its debug menu's frame-rate options (`GFrameRateLimitingOptions`: 0, 12.5, 22, 25, 30, 62) stay at 0, no limit.
+- **Fix:** an fps-lock row for this build writes `fps_target` into `[GEngine]+0x758` (`hle_fpslock.c`), and the profile's `present_interval display` ignores the window's interval: frame time p50 16.7 / p95 17.2 ms in the menus and in gameplay. Bink movies keep their own 30 fps.
+- **Found on:** [Batman: Arkham Asylum](../../dm/games/0100E870163CA000/README.md) (1.0.0; 30 on the Switch, 60 now).
+- **Check:** the world's `TimeSeconds` (`UWorld::GetTimeSeconds`, `main+0x92a9a0`: `[[[[GWorld]+0x70]+0x50]+0]+0x3b8`, `GWorld` at `main+0x2489f18`), read twice through `DM_CTL` peeks at 60 fps: 10.13 s of game time in 10.16 s of real time.
+- **Also:** the port's dynamic resolution (`FDynamicResolution` at `[GEngine]+0x4e8`, its `[DynamicResolution]` config read by `FDynamicResolution::Init`, `main+0xe5b774`: +0 `bEnable` 1, +4 `MinScreenPercentage` 85, +8 `MaxScreenPercentage` 100, +0xc `FrameTimeBudget` 33.3 ms) budgets the GPU for 30 fps. Two more rows: the budget follows `fps_target` (16.2 ms at 60), and the profile key `render_scale` lets `DM_RENDER_SCALE` set the minimum and the maximum alike (the launchers' Render scale). The view it scales is 1920x1080 docked and 1280x720 handheld (`SwitchApp::OnOperationModeChanged`, `main+0xe50b5c`), so the launchers' Resolution (the operation mode: 1920 × 1080 docked, 1280 × 720 handheld) is the other resolution setting.
+
 ## Present interval and display rate
 
 ### Frames of a dynamic present interval held on screen and at the acquire
