@@ -66,4 +66,4 @@ General host changes first needed here; each applies to every game:
 
 ## Open
 
-- The player-facing [README](../../../README.md) lists the games that start in the 2D layout and says the others start in 3D; Digimon is not in that list, but its profile has no `pad_layout` (the default, 2D).
+- The player-facing [README](../../../docs/nxnative.md) lists the games that start in the 2D layout and says the others start in 3D; Digimon is not in that list, but its profile has no `pad_layout` (the default, 2D).

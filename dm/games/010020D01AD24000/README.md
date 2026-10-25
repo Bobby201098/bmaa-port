@@ -36,4 +36,4 @@ On the Mac: the opening rooms at 60 fps with movement, jumping and audio; item p
 
 - Save and reload are unverified: the test did not reach a save checkpoint.
 - The bss is 536 MB in `game.tsv`'s comment and about 537 MB in the bring-up notes ([Memory](#memory)).
-- The player-facing [README](../../../README.md) lists the games that start in the 2D layout and says the others start in 3D; ANIMAL WELL is not in that list, but its profile has `pad_layout simple` (2D).
+- The player-facing [README](../../../docs/nxnative.md) lists the games that start in the 2D layout and says the others start in 3D; ANIMAL WELL is not in that list, but its profile has `pad_layout simple` (2D).
