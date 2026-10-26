@@ -13,7 +13,7 @@ Status: brought up on the Mac: the logo movie, the licence agreement, the main m
 | Node area cut 1 GB → 62 MB (`sdk+0x13be4c` / `+0x13bee0`) and 32 MB alignment for regions of 1 GB and more (`sdk+0x13c03c`) | `dm/tools/sdk_patches.py`, `sdk` build `f118ae1c…` | the 1 GB alignment lost up to 1 GB before each of the two large regions |
 | Engage's 5 GB block: `mem_reserve 0x140000000`, `mem_alias 0x118000000`, `mem_stack 0x10000000`, `app_pool 0xCD500000` | `game.tsv` | 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (never used) |
 
-No `pad_layout` key: the iPhone gamepad starts in the 2D layout ([README](../../../README.md)).
+No `pad_layout` key: the iPhone gamepad starts in the 2D layout ([README](../../../docs/nxnative.md)).
 
 ## Memory
 
