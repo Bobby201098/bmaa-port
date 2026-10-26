@@ -173,6 +173,10 @@ def guess(F, hooks=None):
         # nvnMemoryPoolFlushMappedRange, so without both keys every texture stays 0 and lit surfaces come out black (docs/reference/nvn-objects.md, CPU writes with no flush)
         why = 'Unreal Engine 3 writes its textures into their pools from the CPU after creating them, with no NVN flush: without it the 3D scene is black'
         G['tex_flush_upload'] = ('on', why); G['tex_dirty_upload'] = ('on', '')
+        if F['sysres']:   # with virtual address memory (Batman: Arkham Knight; Arkham Asylum has none): its allocator reserves 37 GB of address space as Unreal Engine 4's FMallocBinned3 does
+            G['mem_reserve'] = ('0x1030000000', 'Unreal Engine 3 with virtual address memory: its allocator reserves 37 GB of address space (74 pools of 512 MB) and 1 GB more in nninitStartup, '
+                                'so a 64 GB alias region as on hardware for the bring-up on the Mac (docs/reference/memory.md)')
+            G['mem_alias'] = ('0x1008000000', '')
     G.update(preset)
     return G
 

@@ -12,7 +12,9 @@
 #             Reset to tested defaults clears all launcher choices; values fixed by an env file stay
 #   label, note  the setting's name and the line under it (may be empty; only for a setting with a cost: latency, memory, heat)
 DM_FPS_TARGET	choice	30=30 fps,60=60 fps	DM_GAME_FPS_TARGET	DM_GAME_FPS_TARGET!=0	Game	Frame rate
-DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE|DM_GAME_RENDER_SCALE==1	Game	Render scale
+DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE|DM_GAME_RENDER_SCALE==1|DM_GAME_UE3_INI==1	Game	Render scale
+DM_AA	toggle	-	1	DM_GAME_UE3_INI==1	Game	Anti-aliasing
+DM_TEX_FILTER	choice	0=Game's,4=4×,8=8×,16=16×	0	gfxapi:nvn	Game	Texture filtering
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language

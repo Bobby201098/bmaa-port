@@ -17,6 +17,7 @@ void mtl_pool_del(const void *mem);
 // memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
 void mtl_alias_drop_pool(const void *pool);
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>
+int nvn_key_mask(uint32_t (*r)[2], int max);   // the control byte ranges [r[i][0], r[i][1]) the shader map's keys zero (its "# key mask:" line); returns how many
 
 typedef struct {
     uint32_t pso, cps, shaders, dss;

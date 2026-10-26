@@ -3372,10 +3372,36 @@ static NSString *exe_rel(const char *rel) {
     return [NSString stringWithFormat:@"%s/%s", dir, rel];
 }
 // Shader mapping table (output of tools/shader_map.py): at runtime only 'Switch control section key → stage' is used; shaders are always translations of the Switch originals (tools/dmsh_build.py produces <key>_b.metallib + reflection offline)
+static NSString *shmap_path(void) {
+    const char *e = getenv("DM_NVN_SHMAP");
+    return e ? @(e) : exe_rel("../games/" DM_GAME_ID "/shader_map.tsv");   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+}
+// The control bytes the map's keys leave out: its "# key mask: 0xA-0xB …" line (shader_split.py key_mask; each range [A, B), zeroed before hashing), read once from the map's comment lines
+// at the first key (hle_nvn.c keys_hash, called from nvnProgramSetShaders before the map itself is loaded). Batman: Arkham Knight: 0x768-0x780 0x7d0-0x7e8; no line in any other game's map
+int nvn_key_mask(uint32_t (*r)[2], int max) {
+    static uint32_t m[4][2]; static int n = -1; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if (n < 0) { @autoreleasepool {
+        n = 0;
+        FILE *f = fopen(shmap_path().fileSystemRepresentation, "r"); char ln[512];
+        while (f && fgets(ln, sizeof ln, f) && ln[0] == '#') {
+            if (strncmp(ln, "# key mask: ", 12)) continue;
+            for (char *s = ln + 12, *t; n < 4; s = t) {
+                unsigned long a = strtoul(s, &t, 0); if (t == s || *t != '-') break;
+                unsigned long b = strtoul(t + 1, &s, 0); if (b <= a || b > 0x880) break;
+                m[n][0] = (uint32_t)a; m[n][1] = (uint32_t)b; n++; t = s;
+            }
+            if (n) MLOG("shader keys leave out control bytes %#x-%#x%s (the map's key mask)", m[0][0], m[0][1], n > 1 ? " and more" : "");
+        }
+        if (f) fclose(f);
+    } }
+    pthread_mutex_unlock(&mu);
+    for (int i = 0; i < n && i < max; i++) { r[i][0] = m[i][0]; r[i][1] = m[i][1]; }
+    return n < max ? n : max;
+}
 static void shmap_load(void) {
     if (g_shmap) return;
-    const char *e = getenv("DM_NVN_SHMAP");
-    NSString *path = e ? @(e) : exe_rel("../games/" DM_GAME_ID "/shader_map.tsv");   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+    NSString *path = shmap_path();
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
     g_shmap = [NSMutableDictionary dictionary];
@@ -4170,6 +4196,10 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    // The launchers' Texture filtering (DM_TEX_FILTER = 2 to 16; 0 or unset keeps the game's): at least that much anisotropy for every trilinear sampler that is no depth comparison
+    // or reduction. Switch games keep it low for the Tegra's bandwidth (Batman: Arkham Knight's ground and walls blurred at an angle); an Apple GPU filters 16× at little cost
+    static int af = -1; if (af < 0) { const char *e = getenv("DM_TEX_FILTER"); af = e ? atoi(e) : 0; af = af < 2 ? 0 : af > 16 ? 16 : af; if (af) MLOG("texture filtering: at least %d× anisotropic for trilinear samplers (DM_TEX_FILTER)", af); }
+    if (af && d.mipFilter == MTLSamplerMipFilterLinear && d.minFilter == MTLSamplerMinMagFilterLinear && !p.cmp_mode && !p.reduction && d.maxAnisotropy < (NSUInteger)af) d.maxAnisotropy = (NSUInteger)af;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
