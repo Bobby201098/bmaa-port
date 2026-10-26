@@ -80,8 +80,29 @@ def ctl_len(ctl):
     n = struct.unpack_from('<I', ctl, 0x20)[0]
     return n if 0x760 <= n < 0x880 else 0x880
 
+# Control bytes zeroed in every key of a game whose engine shares control sections that differ only there (key_mask; written into the shader map's "# key mask:" line, which the host's
+# keys_hash reads): () for every other game, whose keys stay as they were
+KEY_MASK = ()
+UE3_KEY_MASK = ((0x768, 0x780), (0x7d0, 0x7e8))   # Batman: Arkham Knight's shader loader (main+0xb7948c) shares a control section between shaders by a CRC that leaves these two IDs out
+UE3_KEY_MASK_VER = 864   # the lowest Unreal Engine 3 file version measured with it (Batman: Arkham Knight); Arkham Asylum's 579 compares whole control sections
+def key_mask(files):
+    """The control bytes a game's keys leave out, from its files: Unreal Engine 3's global shader cache (GlobalShaderCache-*.bin: 'BMSG', u32 file version) from UE3_KEY_MASK_VER on.
+    Batman: Arkham Knight's loader keys the control sections it has uploaded by a CRC of the whole section except 0x768–0x77f and 0x7d0–0x7e7 (the IDs its cooker writes per record),
+    and a shader whose control section matches one already loaded is given that one: 5 compute shader variants ran with the first one's control section and their own code"""
+    for p, rel in files:
+        if os.path.basename(rel).startswith('GlobalShaderCache-') and rel.endswith('.bin'):
+            with open(p, 'rb') as f: h = f.read(8)
+            if h[:4] == UE3_GSC and struct.unpack_from('<I', h, 4)[0] >= UE3_KEY_MASK_VER: return UE3_KEY_MASK
+    return ()
+
+def key_ctl(ctl):   # the control section as the key hashes it: KEY_MASK's bytes zeroed
+    if not KEY_MASK: return ctl
+    b = bytearray(ctl)
+    for a, e in KEY_MASK: b[a:e] = bytes(len(b[a:e]))
+    return bytes(b)
+
 def skey(ctl, code):
-    return hashlib.sha256(ctl[:ctl_len(ctl)] + code).hexdigest()[:16]
+    return hashlib.sha256(key_ctl(ctl)[:ctl_len(ctl)] + code).hexdigest()[:16]
 
 def same_shader(a, b):
     """Two copies of one key hold the same shader: the code areas are equal, and so are the control sections up to their own length (control +0x20). Pokémon Legends: Z-A's UI layout archives
@@ -89,7 +110,7 @@ def same_shader(a, b):
     (ca, ka), (cb, kb) = a, b
     n = struct.unpack_from('<I', ca, 0x20)[0] if len(ca) >= 0x24 else len(ca)
     n = n if 0x760 <= n <= min(len(ca), len(cb)) else max(len(ca), len(cb))
-    return ka == kb and ca[:n] == cb[:n]
+    return ka == kb and key_ctl(ca)[:n] == key_ctl(cb)[:n]
 
 def check(where, st, ctl, code):
     """control section and code area consistent; returns the reason if not"""
@@ -1324,21 +1345,25 @@ def ue_inline_shaders(d, label, out):
             if len(s) == raw and s[:4] == b'LSLG': take(s, j); break
 
 UE3_TAG, UE3_GSC = struct.pack('<I', uepak.PACKAGE_TAG), b'BMSG'   # an Unreal Engine 3 package (uepak.ue3_summary); the global shader cache (GlobalShaderCache-Switch.bin: 'BMSG', u32 file version, u32 licensee version)
-UE3_FREQ = {0: 'vs', 1: 'ps'}   # the frequency byte of a UE3 shader (EShaderFrequency before hull and domain shaders were added)
+UE3_FREQ = {0: 'vs', 1: 'ps'}   # the frequency byte of a UE3 shader (EShaderFrequency before hull and domain shaders were added: Batman: Arkham Asylum, file version 579)
+# With hull, domain, geometry and compute shaders (Batman: Arkham Knight, file version 864: its global cache has 789 vertex, 807 pixel, 2 geometry and 247 compute shaders, and one vertex
+# shader of frequency 6 with a 4-byte tail, where every other vertex shader has 20). 864 is the lowest version measured; versions between 579 and it are not
+UE3_FREQ_DX11, UE3_FREQ_DX11_VER = {0: 'vs', 1: 'hs', 2: 'ds', 3: 'ps', 4: 'gs', 5: 'cs', 6: 'vs'}, 864
 def ue3_shaders(d, label):
     """The shaders of Unreal Engine 3's shader caches (Batman: Arkham Asylum: the global one in GlobalShaderCache-Switch.bin, 179, and the material shader caches in the cooked packages,
     read once their chunks are decoded, uepak.ue3_image: 516,000 records in 574 of 2,674 packages, 41,641 unique). Each shader, as the engine's Switch RHI serializes it: u8 platform (5),
     u8 frequency (UE3_FREQ), then its code as a byte array (i32 length): {u32 code area length, u32 control length, u32 flags (0; 0x20000 in 29 pixel shaders)}, the code area, the control
     section (0x880 bytes) and a tail (20 bytes after a vertex shader, 4 after a pixel shader). Found by the control magic, with the code area of the length control +0x704 gives right in
     front of it, the three words that repeat both lengths in front of that, and an array length that covers them with a tail of at most 64 bytes; every control magic of the decoded packages
-    is in such a record. The engine combines vertex and pixel shaders per draw (separable_pairs)"""
-    out = []
+    is in such a record. The engine combines vertex and pixel shaders per draw (separable_pairs). The frequency numbering follows the file version, the u16 at +4 of a package and of the
+    global cache (Batman: Arkham Knight: pixel shaders are frequency 3)"""
+    out, freq = [], UE3_FREQ_DX11 if len(d) >= 6 and struct.unpack_from('<H', d, 4)[0] >= UE3_FREQ_DX11_VER else UE3_FREQ
     for m in re.finditer(re.escape(CTL_MAGIC), d):
         c = m.start(); n = struct.unpack_from('<I', d, c + 0x704)[0] if c + 0x708 <= len(d) else 0; k = c - n
         alen, ncode, nctl, _ = struct.unpack_from('<i3I', d, k - 16) if 18 <= k else (0, 0, 0, 0)
         if not n or d[k:k + 4] not in (GFX_MAGIC, CS_MAGIC) or ncode != n or not 0 <= alen - 12 - n - nctl <= 64 or c + nctl > len(d):
             print(f'[RED] {label} control section @{c:#x}: not in a shader record of the known form; left out', flush=True); continue
-        ctl, code = d[c:c + nctl], d[k:c]; st = UE3_FREQ.get(d[k - 17])
+        ctl, code = d[c:c + nctl], d[k:c]; st = freq.get(d[k - 17])
         if not st or st != ('cs' if code[:4] == CS_MAGIC else sph_stage(code)): red(f'{label}: the shader at {k:#x} has frequency {d[k - 17]}, its code area says {"compute" if code[:4] == CS_MAGIC else sph_stage(code)}')
         why = check(label, st, ctl, code)
         if why: red(f'{label}: shader at {k:#x} ({st}): {why}')
@@ -1378,9 +1403,9 @@ NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
 COMMON, TREES = None, {}   # Unity common strings and borrowed type trees (given when the pool starts)
 ZDICTS, _ZD = {}, {}       # zstd dictionaries by ID (given when the pool starts) and their digested form in this process
 
-def _pool_init(common, trees, zdicts={}):
-    global COMMON, TREES, ZDICTS
-    COMMON, TREES, ZDICTS = common, trees, zdicts
+def _pool_init(common, trees, zdicts={}, mask=()):
+    global COMMON, TREES, ZDICTS, KEY_MASK
+    COMMON, TREES, ZDICTS, KEY_MASK = common, trees, zdicts, mask
 
 def zs_dicts(romfs):
     """Tears of the Kingdom compresses its RomFS files with zstd dictionaries (the frame header names one, ID 1 for the shader packages). They ship as Pack/ZsDic.pack.zs:
@@ -1659,6 +1684,9 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'{len(romfs_v)} RomFS and {len(main_v)} main: they must pair one to one')
+    global KEY_MASK   # decided from the files of every version before any key is made (key_mask), and given to the workers
+    KEY_MASK = key_mask([(os.path.join(dp, f), f) for r in romfs_v for dp, _, fs in os.walk(r) for f in fs])
+    if KEY_MASK: print('key mask: control bytes ' + ' '.join(f'{a:#x}-{e - 1:#x}' for a, e in KEY_MASK) + ' are zeroed in every key (Unreal Engine 3 shares control sections that differ only there)', flush=True)
     files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
@@ -1699,7 +1727,7 @@ def main():
     ck_jobs, cpks = cpk_jobs(files)   # Bayonetta 2's CRI CPK archives (CRILAYLA entries)
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks]
-    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
+    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts, KEY_MASK)) as ex:
         results += list(ex.map(scan_file, big)) + list(ex.map(scan_file, files, chunksize=16))
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
@@ -1710,7 +1738,7 @@ def main():
         import unityfs
         for k in unityfs.KNOWN_TREES: trees.setdefault(k, unityfs.known_tree(*k))
         byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts, KEY_MASK)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}: Unity serialized file without type trees, and no bundle has a Shader type tree of the same hash to borrow')
         results = [r for r in results if r[3] != 'defer'] + again
@@ -1749,6 +1777,7 @@ def main():
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] and '#UE3@' not in r[4] for r in rows)),
                                             ('Unreal Engine 3 shader caches', any('#UE3@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
+        if KEY_MASK: f.write('# key mask: ' + ' '.join(f'{a:#x}-{e:#x}' for a, e in KEY_MASK) + '  (control bytes zeroed in every key: shader_split.py key_mask, the host\'s keys_hash)\n')
         f.write('# column 5 records where each key first appears; this game has no PC version to pair with\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')

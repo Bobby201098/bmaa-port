@@ -1339,7 +1339,7 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); snap_dra
 
 // ================= Render replay =================
 #include "../../host/front.h"
-static int g_red_once[113];
+static int g_red_once[115];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("[RED] " __VA_ARGS__); } while (0)
 // NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
 // and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
@@ -2907,10 +2907,36 @@ static NSString *exe_rel(const char *rel) {
     return [NSString stringWithFormat:@"%s/%s", dir, rel];
 }
 // Shader mapping table (output of tools/shader_map.py): at runtime only 'Switch control section key → stage' is used; shaders are always translations of the Switch originals (tools/dmsh_build.py produces <key>_b.metallib + reflection offline)
+static NSString *shmap_path(void) {
+    const char *e = getenv("DM_NVN_SHMAP");
+    return e ? @(e) : exe_rel("../games/" DM_GAME_ID "/shader_map.tsv");   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+}
+// The control bytes the map's keys leave out: its "# key mask: 0xA-0xB …" line (shader_split.py key_mask; each range [A, B), zeroed before hashing), read once from the map's comment lines
+// at the first key (hle_nvn.c keys_hash, called from nvnProgramSetShaders before the map itself is loaded). Batman: Arkham Knight: 0x768-0x780 0x7d0-0x7e8; no line in any other game's map
+int nvn_key_mask(uint32_t (*r)[2], int max) {
+    static uint32_t m[4][2]; static int n = -1; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&mu);
+    if (n < 0) { @autoreleasepool {
+        n = 0;
+        FILE *f = fopen(shmap_path().fileSystemRepresentation, "r"); char ln[512];
+        while (f && fgets(ln, sizeof ln, f) && ln[0] == '#') {
+            if (strncmp(ln, "# key mask: ", 12)) continue;
+            for (char *s = ln + 12, *t; n < 4; s = t) {
+                unsigned long a = strtoul(s, &t, 0); if (t == s || *t != '-') break;
+                unsigned long b = strtoul(t + 1, &s, 0); if (b <= a || b > 0x880) break;
+                m[n][0] = (uint32_t)a; m[n][1] = (uint32_t)b; n++; t = s;
+            }
+            if (n) MLOG("shader keys leave out control bytes %#x-%#x%s (the map's key mask)", m[0][0], m[0][1], n > 1 ? " and more" : "");
+        }
+        if (f) fclose(f);
+    } }
+    pthread_mutex_unlock(&mu);
+    for (int i = 0; i < n && i < max; i++) { r[i][0] = m[i][0]; r[i][1] = m[i][1]; }
+    return n < max ? n : max;
+}
 static void shmap_load(void) {
     if (g_shmap) return;
-    const char *e = getenv("DM_NVN_SHMAP");
-    NSString *path = e ? @(e) : exe_rel("../games/" DM_GAME_ID "/shader_map.tsv");   // default: the current game profile folder (Mac: dm/games/<id>; on iOS main.m sets DM_NVN_SHMAP)
+    NSString *path = shmap_path();
     NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     if (!txt) MDIE("cannot read the shader map %s (DM_NVN_SHMAP can name another)", path.UTF8String);
     g_shmap = [NSMutableDictionary dictionary];
@@ -3719,6 +3745,10 @@ static id<MTLSamplerState> samp_by_id(int sid) {   // Caller holds g_rmu
     d.sAddressMode = wrapm(p.ws); d.tAddressMode = wrapm(p.wt); d.rAddressMode = wrapm(p.wr);
     d.lodMinClamp = p.lod_min < 0 ? 0 : p.lod_min; d.lodMaxClamp = p.lod_max;
     d.maxAnisotropy = p.aniso < 1 ? 1 : p.aniso > 16 ? 16 : (NSUInteger)p.aniso;
+    // The launchers' Texture filtering (DM_TEX_FILTER = 2 to 16; 0 or unset keeps the game's): at least that much anisotropy for every trilinear sampler that is no depth comparison
+    // or reduction. Switch games keep it low for the Tegra's bandwidth (Batman: Arkham Knight's ground and walls blurred at an angle); an Apple GPU filters 16× at little cost
+    static int af = -1; if (af < 0) { const char *e = getenv("DM_TEX_FILTER"); af = e ? atoi(e) : 0; af = af < 2 ? 0 : af > 16 ? 16 : af; if (af) MLOG("texture filtering: at least %d× anisotropic for trilinear samplers (DM_TEX_FILTER)", af); }
+    if (af && d.mipFilter == MTLSamplerMipFilterLinear && d.minFilter == MTLSamplerMinMagFilterLinear && !p.cmp_mode && !p.reduction && d.maxAnisotropy < (NSUInteger)af) d.maxAnisotropy = (NSUInteger)af;
     if (p.cmp_mode) d.compareFunction = (MTLCompareFunction)(p.cmp_func - 1);
     // Reduction (NVN 1 min / 2 max): the minimum or maximum of the texels a filtered sample covers, per channel (Metal 26). Pokémon Legends: Z-A builds its depth pyramid with a min sampler
     // (151607c7a92386cc reads the level above at an explicit LOD) and tests occlusion boxes against it; averaged, the pyramid is nearer than the scene at depth edges. Metal ignores the reduction
@@ -3805,9 +3835,31 @@ static void ubd_dirty(uint64_t lo, uint64_t hi) {
     for (int st = 0; st < 6; st++) { if (g_args_dirty[st]) continue;
         for (int r = 0; r < 16; r++) { const p_bind_buf *u = &S.ubo[st][r]; if (u->addr && lo < u->addr + u->size && u->addr < hi) { g_args_dirty[st] = 1; break; } } }
 }
+static int vc_draw_range(const p_draw *dw, const p_draw_idx *di, int64_t *lo, int64_t *hi);
+// A vertex stream whose address is not a multiple of 4: Metal wants vertex data 4-byte aligned, and Apple GPUs fetch it from the aligned word below, so every attribute read the bytes
+// in front of it (Batman: Arkham Knight's Scaleform UI binds its vertices at 2 mod 4: an RGBA8UI batch index read the top of the position before it, every glyph got another batch's
+// transform or none, and the menus drew pale shapes with no text). The vertices the draw reads are copied to an aligned staging buffer, once per submission and range; a stream whose
+// range is not known (instanced, indirect) is copied whole up to 4 MB. Returns the GPU address to bind, 0 when the copy cannot be made
+static uint64_t vb_realign(int s, uint64_t addr, const p_draw *dw, const p_draw_idx *di) {
+    static struct { uint64_t addr, lo, n, serial, gpu; } c[16]; static int next;
+    uint64_t size = S.vbuf[s].size, stride = S.stream[s].stride, lo = 0, n = size;
+    int64_t a0, a1;
+    if (stride && !S.stream[s].divisor && vc_draw_range(dw, di, &a0, &a1) && a0 >= 0 && (uint64_t)a0 * stride < size) {
+        lo = (uint64_t)a0 * stride; n = (uint64_t)(a1 - a0) * stride + (stride > 64 ? stride : 64);   // the last vertex's attributes lie within its stride
+        if (lo + n > size) n = size - lo;
+    } else if (!stride) n = size < 256 ? size : 256;
+    if (n > (4u << 20)) { RED_ONCE(113, "vertex stream %d at %#llx is not 4-byte aligned and its range (%llu bytes) is too large to copy: bound as it is", s, (unsigned long long)addr, (unsigned long long)n); return 0; }
+    for (int i = 0; i < 16; i++) if (c[i].serial == g_sub_serial && c[i].addr == addr && c[i].lo == lo && c[i].n == n) return c[i].gpu - lo;
+    if (pend_hits(addr + lo, n)) RED_ONCE(114, "vertex stream %d at %#llx is not 4-byte aligned and the GPU writes it in this submission: the aligned copy is made from the CPU's view", s, (unsigned long long)addr);
+    id<MTLBuffer> b; size_t o = arena_alloc((size_t)n, &b);
+    memcpy((uint8_t *)b.contents + o, (const void *)(uintptr_t)(addr + lo), (size_t)n);
+    int k = next++ % 16; c[k].addr = addr; c[k].lo = lo; c[k].n = n; c[k].serial = g_sub_serial; c[k].gpu = b.gpuAddress + o;
+    static int once; if (!once++) MLOG("vertex streams at addresses that are not multiples of 4 are copied to aligned memory for each draw (first: %#llx)", (unsigned long long)addr);
+    return c[k].gpu - lo;   // vertex v of the draw reads lo + v × stride bytes after the guest address, now after the copy
+}
 // Resolved guest streams are separate from the table cache: vconv_bind may overwrite a stream's table slot.
 // Take the pool generation before resolving, so a concurrent pool change forces a fresh lookup next time.
-static void bind_vbufs(id<MTL4RenderCommandEncoder> en) {
+static void bind_vbufs(id<MTL4RenderCommandEncoder> en, const p_draw *dw, const p_draw_idx *di) {
     static struct { uint64_t addr, gpu, gen; } cache[16];
     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
     for (int s = 0; s < 16; s++) {
@@ -3819,6 +3871,7 @@ static void bind_vbufs(id<MTL4RenderCommandEncoder> en) {
             if (!mtl_gpu_addr(addr, 1, &mb, &mo, &gpu)) continue;
             cache[s].addr = addr; cache[s].gpu = gpu; cache[s].gen = gen;
         }
+        if (gpu & 3) { uint64_t g = vb_realign(s, addr, dw, di); if (g) gpu = g; }
         enc_r_vbuf(en, VB_SLOT(s), gpu);
     }
     static id<MTLBuffer> zero; static uint64_t zero_gpu;
@@ -7033,7 +7086,7 @@ static void tf_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     MTL4RenderPassDescriptor *d = [MTL4RenderPassDescriptor new]; d.renderTargetWidth = 1; d.renderTargetHeight = 1; d.defaultRasterSampleCount = 1;
     id<MTL4RenderCommandEncoder> en = enc_r_begin(d);
     enc_r_pso(en, ps);
-    bind_vbufs(en);
+    bind_vbufs(en, dw, NULL);
     vconv_bind(en, vs, 1, dw, NULL);
     args_dirty_all(); encode_args(en, vs, 0, 1);
     for (int b = 0; b < 4; b++) if (vs->tf_stride[b]) {   // vertex v of the draw (first + i) stores at v × stride: the pointer starts first × stride before the write offset
@@ -7265,7 +7318,7 @@ static void draw(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
-    bind_vbufs(en);
+    bind_vbufs(en, dw, di);
     if (pr->sh[0]) vconv_bind(en, pr->sh[0], 0, dw, di);   // integer inputs fed float-type formats or 8 / 16-bit integers of the other sign (see vconv_ncomp, vconv_int)
     g_kd_force = kd_draw(pr, dw, di);
     if (pr->sh[0]) encode_args(en, pr->sh[0], 0, 1);

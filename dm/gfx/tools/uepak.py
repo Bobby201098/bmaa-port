@@ -494,13 +494,14 @@ def ue3_summary(b):
     """The summary of an Unreal Engine 3 package, read as far as its compressed chunk table, or None for a file that is not one (Unreal Engine 4 writes a negative legacy version after the
     tag; Batman: Arkham Asylum's texture file cache Textures.tfc starts with a compressed chunk, block size 0x20000 where the version would be). Layout (Batman: Arkham Asylum, file version 579,
     licensee 21): tag, u16 file version, u16 licensee version, i32 header size, folder name (FString), u32 package flags, name, export and import counts and offsets (i32 each), the depends offset,
+    from version 623 the import / export GUID offset and the two GUID counts, from version 584 the thumbnail table offset (Batman: Arkham Knight, file version 864, licensee 0x80e3, has all four),
     a GUID, the generations (i32 count, then export count, name count and, from version 322, net object count each), engine version, cooker version, u32 compression flags (Batman: 8, Oodle),
     then the compressed chunks {raw offset, raw size, stored offset, stored size}. b: at least the summary's bytes. → {'version', 'licensee', 'flags', 'compression', 'chunks'}"""
     if len(b) < 0x40 or struct.unpack_from('<I', b)[0] != PACKAGE_TAG: return None
     ver, lic = struct.unpack_from('<HH', b, 4)
     if not 100 <= ver < 1000: return None
     try:
-        r = R(b, 12); r.fstr(); flags = r.take('<I'); r.raw(4 * 7 + 16)
+        r = R(b, 12); r.fstr(); flags = r.take('<I'); r.raw(4 * (7 + 3 * (ver >= 623) + (ver >= 584)) + 16)
         gens = r.take('<i'); r.raw(gens * (12 if ver >= 322 else 8)); r.raw(8 if ver >= 277 else 4)   # engine and (from version 277) cooker versions
         comp, n = r.take('<Ii') if ver >= 334 else (0, 0)   # packages are compressed from version 334
         chunks = [r.take('<4I') for _ in range(n)]

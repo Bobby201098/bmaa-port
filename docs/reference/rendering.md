@@ -347,6 +347,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
 - **Cause / Fix:** Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print the line once. The integer-read-as-float formats (`*_UI2F` / `*_I2F`, 0x51–0x68), which Metal has no vertex format for, are converted on the CPU at replay like the other conversions (`vconv_i2f`).
 - **Found on:** [Super Mario Bros. Wonder](../../dm/games/010015100B514000/README.md) (`RGB10A2SN`); [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) has an `RG8_UI2F` attribute.
 
+### Vertex streams at addresses that are not multiples of 4
+
+- **Symptom:** menus drawn as pale shapes over the whole screen with no text, though the glyph cache holds every glyph; `DM_NVN_HILITE` on the text's fragment shader colours none of the batched text draws.
+- **Cause:** the game binds its vertex streams at addresses that are 2 mod 4 (Scaleform's vertex buffers, `vb=0x…ec6` in `DM_NVN_PASSDUMP`). Maxwell fetches vertex data at any byte address; Metal wants it 4-byte aligned, and an Apple GPU reads the aligned word below, so every attribute took the bytes in front of it. The batched text shader reads an `RGBA8UI` batch index (`as_type<int>` of the input, then 4 × index + 10 as the row of its transform) and got the top byte of the position before it: 68 instead of 0 to 9, a row past the 4 KB uniform buffer, and every glyph collapsed. The shapes drew with shifted positions and colours.
+- **Fix:** `bind_vbufs` (`nvn_mtl.m` `vb_realign`) copies a stream whose address is not a multiple of 4 to aligned staging memory: the vertices the draw reads (`vc_draw_range`), once per submission and range, or the whole stream up to 4 MB when the range is not known (instanced, indirect). A stream the GPU writes in the same submission is copied from the CPU's view, with a red line. Aligned streams take the path they took before.
+- **Check:** the language screen's draws, dumped with `DM_NVN_CBDUMP` and emulated offline, placed the language names on screen with the right transforms; with the copy, the screen shows them over its dark background.
+- **Found on:** [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) (Scaleform UI: the language screen and the health warning).
+
 ### Vertex streams 14 and 15 at Metal slots 14 and 15
 
 - **Symptom:** the assertion `buffer index (31) must be < 31`.

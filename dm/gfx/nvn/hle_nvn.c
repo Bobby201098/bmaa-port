@@ -590,7 +590,17 @@ static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
     uint32_t nctl = 0x880, own; memcpy(&own, (const uint8_t *)sd->control + 0x20, 4);
     if (own >= 0x760 && own < 0x880) nctl = own;
     uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
-    CC_SHA256_Update(&hc, sd->control, nctl);
+    // The map's key mask (nvn_key_mask; Batman: Arkham Knight): those control bytes count as zero, as in shader_split.py's keys. The game gives shaders whose control sections
+    // differ only there the first one it loaded, so which one a shader gets depends on the load order, and the key must not
+    uint32_t mk[4][2]; int nm = nvn_key_mask(mk, 4);
+    if (!nm) CC_SHA256_Update(&hc, sd->control, nctl);
+    else { static const uint8_t zero[0x880]; uint32_t at = 0;
+        for (int i = 0; i < nm && mk[i][0] < nctl; i++) {
+            if (mk[i][0] < at) continue;   // ranges in order, not overlapping (shader_split.py writes them so)
+            CC_SHA256_Update(&hc, (const uint8_t *)sd->control + at, mk[i][0] - at);
+            uint32_t e = mk[i][1] < nctl ? mk[i][1] : nctl; CC_SHA256_Update(&hc, zero, e - mk[i][0]); at = e;
+        }
+        CC_SHA256_Update(&hc, (const uint8_t *)sd->control + at, nctl - at); }
     if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
     CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
     return 1;
