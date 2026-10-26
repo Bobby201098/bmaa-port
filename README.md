@@ -37,3 +37,7 @@ Tested from the start of the game into its first area, on the Mac and on iOS. Kn
 ## Credits and licence
 
 Built on [nxnative](https://github.com/seedds/nxnative) and the projects it credits ([docs/nxnative.md](docs/nxnative.md#acknowledgements)). The code is under the MIT licence ([LICENSE](LICENSE)). Batman and all related names are trademarks of DC; Batman: Arkham Asylum is a game by Rocksteady Studios, published by Warner Bros. Games.
+
+##Support me
+If you want to get cool ports or to see many cool things I develop I will appreciate some support from the community to keep going :) 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/N0T729IA98)
